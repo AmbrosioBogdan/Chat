@@ -133,7 +133,7 @@ app.get("/mcp/:secret", (req, res) => {
 });
 
 // MCP transport (POST only)
-app.post("/mcp/:secret", async (req, res) => {
+app.all("/mcp/:secret", async (req, res) => {
   try {
     if (!checkSecret(req, res)) return;
 
