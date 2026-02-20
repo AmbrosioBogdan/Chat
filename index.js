@@ -1,27 +1,96 @@
-const express = require('express');
-const axios = require('axios');
-const app = express();
+import express from "express";
+import axios from "axios";
+import { z } from "zod";
 
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+const app = express();
 app.use(express.json());
 
-app.post('/tools/list-services', async (req, res) => {
+// ---- Config ----
+const RENDER_API_BASE = "https://api.render.com/v1";
+const RENDER_API_KEY = process.env.RENDER_API_KEY;
+
+// (Consigliato) proteggi l’endpoint MCP con un secret condiviso
+const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET;
+
+// ---- MCP Server ----
+const server = new McpServer({
+  name: "render-mcp",
+  version: "1.0.0",
+});
+
+// Tool: lista servizi
+server.tool(
+  "render_list_services",
+  "List Render services",
+  z.object({}),
+  async () => {
+    if (!RENDER_API_KEY) {
+      return { content: [{ type: "text", text: "Missing RENDER_API_KEY env var." }] };
+    }
+
+    const r = await axios.get(`${RENDER_API_BASE}/services`, {
+      headers: { Authorization: `Bearer ${RENDER_API_KEY}` },
+    });
+
+    // Ritorno sintetico
+    const simplified = r.data.map((x) => ({
+      id: x.service?.id,
+      name: x.service?.name,
+      type: x.service?.type,
+    }));
+
+    return { content: [{ type: "text", text: JSON.stringify(simplified, null, 2) }] };
+  }
+);
+
+// Tool: trigger deploy (usa l’API deploys)
+server.tool(
+  "render_deploy_service",
+  "Trigger a deploy for a Render service by serviceId",
+  z.object({
+    serviceId: z.string().min(1),
+  }),
+  async ({ serviceId }) => {
+    if (!RENDER_API_KEY) {
+      return { content: [{ type: "text", text: "Missing RENDER_API_KEY env var." }] };
+    }
+
+    // Render: creare un deploy è POST /services/{id}/deploys
+    const r = await axios.post(
+      `${RENDER_API_BASE}/services/${serviceId}/deploys`,
+      {},
+      { headers: { Authorization: `Bearer ${RENDER_API_KEY}` } }
+    );
+
+    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  }
+);
+
+// Healthcheck (utile per Render)
+app.get("/", (_req, res) => res.status(200).send("ok"));
+
+// Endpoint MCP (Streamable HTTP)
+app.all("/mcp", async (req, res) => {
   try {
-    const response = await axios.get('https://api.render.com/v1/services', {
-      headers: {
-        Authorization: `Bearer ${process.env.RENDER_API_KEY}`
+    // Auth semplice tramite header
+    if (MCP_SHARED_SECRET) {
+      const got = req.header("x-mcp-secret");
+      if (got !== MCP_SHARED_SECRET) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
-    });
+    }
 
-    res.json({
-      content: response.data
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    const transport = new StreamableHTTPServerTransport(req, res);
+    await server.connect(transport);
+  } catch (e) {
+    res.status(500).json({ error: e?.message ?? String(e) });
   }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+const PORT = Number(process.env.PORT || 10000);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Render MCP server listening on ${PORT}`);
 });
