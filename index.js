@@ -13,7 +13,7 @@ const RENDER_API_BASE = "https://api.render.com/v1";
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 
 // (Consigliato) proteggi l’endpoint MCP con un secret condiviso
-const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET;
+const MCP_PATH_SECRET = process.env.MCP_PATH_SECRET; // es: "a1b2c3d4..."
 
 // ---- MCP Server ----
 const server = new McpServer({
@@ -73,12 +73,11 @@ server.tool(
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
 // Endpoint MCP (Streamable HTTP)
-app.all("/mcp", async (req, res) => {
+app.all("/mcp/:secret?", async (req, res) => {
   try {
-    // Auth semplice tramite header
-    if (MCP_SHARED_SECRET) {
-      const got = req.header("x-mcp-secret");
-      if (got !== MCP_SHARED_SECRET) {
+    if (MCP_PATH_SECRET) {
+      const got = req.params.secret;
+      if (got !== MCP_PATH_SECRET) {
         return res.status(401).json({ error: "Unauthorized" });
       }
     }
