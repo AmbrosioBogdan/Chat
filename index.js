@@ -5,7 +5,7 @@ app.use(express.json());
 
 app.post('/mcp', async (req, res) => {
   try {
-    const response = await axios.post('IL_TUO_ENDPOINT', req.body);
+    const response = await axios.post('https://chat-3ins.onrender.com', req.body);
     res.json(response.data);
   } catch (error) {
     res.status(500).json({ error: error.message });
