@@ -1,6 +1,7 @@
 import express from "express";
 import { Readable } from "stream";
 import { once } from "events";
+import { createBrotliDecompress } from "zlib";
 
 const app = express();
 
@@ -144,6 +145,9 @@ app.all("/mcp/:secret", async (req, res) => {
       const k = key.toLowerCase();
       // Evitiamo header che Express gestisce da solo o che possono essere problematici
       if (k === "transfer-encoding") return;
+      // Rimuoviamo content-encoding perché potrebbe essere compresso da Render
+      // e causerebbe problemi di decompressione al client
+      if (k === "content-encoding") return;
       res.setHeader(key, value);
     });
 
@@ -218,7 +222,25 @@ app.all("/mcp/:secret", async (req, res) => {
       else {
         log(">> Using BUFFER mode (non-SSE, content-length present)");
         try {
-          const buffer = await upstreamResp.arrayBuffer();
+          let buffer = await upstreamResp.arrayBuffer();
+          
+          // Se la response è compresso da Render (content-encoding: br), decomprimiamo
+          const contentEncoding = upstreamResp.headers.get("content-encoding") || "";
+          if (contentEncoding.includes("br")) {
+            log("Decompressing brotli-compressed body");
+            const decompressed = await new Promise((resolve, reject) => {
+              const decompress = createBrotliDecompress();
+              let chunks = [];
+              decompress.on("data", (chunk) => chunks.push(chunk));
+              decompress.on("end", () => resolve(Buffer.concat(chunks)));
+              decompress.on("error", reject);
+              decompress.write(Buffer.from(buffer));
+              decompress.end();
+            });
+            buffer = decompressed.buffer;
+            log("Decompressed size:", buffer.byteLength, "bytes");
+          }
+          
           const nodeBuffer = Buffer.from(buffer);
           log("Response buffered:", nodeBuffer.length, "bytes");
           res.write(nodeBuffer);
