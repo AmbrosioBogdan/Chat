@@ -143,15 +143,24 @@ app.all("/mcp/:secret", async (req, res) => {
       const k = key.toLowerCase();
       // Evitiamo header che Express gestisce da solo o che possono essere problematici
       if (k === "transfer-encoding") return;
-      // CRITICO: rimuovere content-encoding
-      // Node.js fetch() decomprime AUTOMATICAMENTE il body
-      // Se propaghiamo content-encoding: br al client, cercherà di decomprimere dati GIÀ decompressi → timeout
+      // CRITICO: rimuovere content-encoding E content-length
+      // Node.js fetch() decomprime AUTOMATICAMENTE il body, quindi:
+      // - Se era compresso (br/gzip), il decompresso è PIÙ GRANDE
+      // - Se propaghiamo content-length originale, client vede mismatch e chiude
+      // - Se propaghiamo content-encoding, client cercapotrebbe decomprimere dati già decompressti
       if (k === "content-encoding") {
         log("Stripping content-encoding header (Node.js fetch already decompressed)");
         return;
       }
+      if (k === "content-length") {
+        log("Stripping content-length header (body size changed after decompression)");
+        return;
+      }
       res.setHeader(key, value);
     });
+
+    // Forziamo chunked transfer encoding perché non sappiamo la size dopo decompressione
+    res.setHeader("Transfer-Encoding", "chunked");
 
     log("Response headers set on client connection");
 
