@@ -1,4 +1,4 @@
-2026-02-21T13:00:23.024Z Starting server with config: {
+2026-02-21T13:11:02.912Z Starting server with config: {
   PORT: 10000,
   UPSTREAM_MCP_URL: 'https://mcp.render.com/mcp',
   RENDER_API_KEY: 'rnd_…CoUb',

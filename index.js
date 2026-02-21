@@ -78,7 +78,12 @@ app.all("/mcp/:secret", async (req, res) => {
     if (req.body) {
       try {
         const len = Buffer.isBuffer(req.body) ? req.body.length : JSON.stringify(req.body).length;
-        log("Request body size", len);
+        log("Request body size", len, "bytes");
+        // Log body content per debug (limited to 500 chars)
+        if (Buffer.isBuffer(req.body)) {
+          const bodyStr = req.body.toString("utf8").slice(0, 500);
+          log("Request body preview:", bodyStr);
+        }
       } catch (e) {
         log("Request body size: unknown");
       }
@@ -180,10 +185,10 @@ app.all("/mcp/:secret", async (req, res) => {
         totalBytes += chunk.length;
         log("Chunk from upstream", chunk.length, "bytes (total:", totalBytes, "bytes,", chunkCount, "chunks)");
         // For small chunks, also log text to help debugging
-        if (chunk.length < 256) {
+        if (chunk.length < 512) {
           try { 
-            const text = chunk.toString("utf8").slice(0, 200);
-            log("Chunk text:", JSON.stringify(text)); 
+            const text = chunk.toString("utf8");
+            log("Chunk text:", text.slice(0, 300)); 
           } catch {}
         }
       });
