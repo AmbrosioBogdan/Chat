@@ -1,14 +1,49 @@
 import express from "express";
+import { Readable } from "stream";
+import { once } from "events";
 
 const app = express();
 
-// IMPORTANT: per fare da proxy MCP dobbiamo leggere il body "grezzo"
+// IMPORTANT: per fare da proxy MCP dobbiamo poter inoltrare request/response.
+// Per la maggior parte dei casi manteniamo `express.raw` per semplicità,
+// ma non lo usiamo per streaming pass-through. Qui lo lasciamo come limite.
 app.use(express.raw({ type: "*/*", limit: "10mb" }));
 
-const MCP_PATH_SECRET = process.env.MCP_PATH_SECRET; // tuo secret nell'URL
-const RENDER_API_KEY = process.env.RENDER_API_KEY;   // API key Render (Bearer)
+const MCP_PATH_SECRET = process.env.MCP_PATH_SECRET || process.env.MCP_SHARED_SECRET; // tuo secret nell'URL
+const RENDER_API_KEY = process.env.RENDER_API_KEY; // API key Render (Bearer)
 
-const UPSTREAM_MCP_URL = "https://mcp.render.com/mcp";
+const UPSTREAM_MCP_URL = process.env.UPSTREAM_MCP_URL || "https://mcp.render.com/mcp";
+
+// semplice logger con timestamp
+function now() {
+  return new Date().toISOString();
+}
+function log(...args) {
+  console.log(now(), ...args);
+}
+
+process.on("uncaughtException", (err) => {
+  console.error(now(), "uncaughtException", err && err.stack ? err.stack : err);
+  // non exiting to allow debugging — in produzione si potrebbe process.exit(1)
+});
+process.on("unhandledRejection", (reason) => {
+  console.error(now(), "unhandledRejection", reason);
+});
+
+// Log configuration at startup (mask sensitive values)
+function mask(s) {
+  if (!s) return "(missing)";
+  if (s.length <= 8) return "(masked)";
+  return s.slice(0, 4) + "…" + s.slice(-4);
+}
+
+log("Starting server with config:", {
+  PORT: process.env.PORT || 10000,
+  UPSTREAM_MCP_URL,
+  RENDER_API_KEY: mask(RENDER_API_KEY),
+  MCP_PATH_SECRET: mask(MCP_PATH_SECRET || process.env.MCP_SHARED_SECRET),
+  UPSTREAM_TIMEOUT_MS: process.env.UPSTREAM_TIMEOUT_MS || 120000,
+});
 
 function checkSecret(req, res) {
   if (!MCP_PATH_SECRET) return true;
@@ -38,39 +73,72 @@ app.all("/mcp/:secret", async (req, res) => {
       return res.status(500).json({ error: "Missing RENDER_API_KEY env var" });
     }
 
-    // Copiamo gli header della request, ma ripuliamo quelli che creano problemi in proxy
-    const headers = new Headers();
+    log("Incoming request", req.method, req.originalUrl);
+    log("Request headers", req.headers);
+    // If body was parsed (small requests), log size
+    if (req.body) {
+      try {
+        const len = Buffer.isBuffer(req.body) ? req.body.length : JSON.stringify(req.body).length;
+        log("Request body size", len);
+      } catch (e) {
+        log("Request body size: unknown");
+      }
+    }
+
+    // Copiamo gli header della request come semplice oggetto, escludendo quelli problematici
+    const headers = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (!v) continue;
       const key = k.toLowerCase();
-      if (key === "host") continue;
-      if (key === "connection") continue;
-      if (key === "content-length") continue;
-      headers.set(k, Array.isArray(v) ? v.join(",") : v);
+      if (key === "host" || key === "connection" || key === "content-length") continue;
+      headers[k] = Array.isArray(v) ? v.join(",") : v;
     }
 
     // Forziamo auth per l'upstream Render MCP
-    headers.set("Authorization", `Bearer ${RENDER_API_KEY}`);
+    headers["Authorization"] = `Bearer ${RENDER_API_KEY}`;
 
     // Assicuriamoci che SSE sia accettato (ChatGPT se lo aspetta)
-    if (!headers.get("Accept")) {
-      headers.set("Accept", "text/event-stream");
+    if (!headers["Accept"] && !headers["accept"]) {
+      headers["Accept"] = "text/event-stream";
     }
 
     const method = req.method.toUpperCase();
     const hasBody = !(method === "GET" || method === "HEAD");
 
-    // Node fetch: se mandi body con stream, serve duplex; con Buffer va bene comunque,
-    // ma aggiungiamo duplex per robustezza.
+    // timeout/abort in caso di upstream che resta appeso
+    const controller = new AbortController();
+    const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS || 120000);
+    const timeoutId = setTimeout(() => {
+      log("Aborting upstream fetch due to timeout", timeoutMs);
+      try { controller.abort(); } catch (e) {}
+    }, timeoutMs);
+
+    // Per ora inoltriamo solo body bufferizzati (express.raw). Evitiamo conversioni complesse.
+    const bodyToSend = hasBody && req.body && Buffer.isBuffer(req.body) ? req.body : undefined;
+
+    log("Forwarding to upstream", UPSTREAM_MCP_URL, "method", method);
     const upstreamResp = await fetch(UPSTREAM_MCP_URL, {
       method,
       headers,
-      body: hasBody ? req.body : undefined,
+      body: hasBody ? bodyToSend : undefined,
       duplex: hasBody ? "half" : undefined,
-    });
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeoutId));
+
+    log("Upstream responded", upstreamResp.status, upstreamResp.statusText);
 
     // Propaghiamo status e header (incluso Content-Type: text/event-stream)
     res.status(upstreamResp.status);
+
+    // Ensure SSE clients get headers flushed early
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    // Log all response headers from upstream before setting them
+    log("Upstream response headers:");
+    upstreamResp.headers.forEach((value, key) => {
+      log("  ", key, ":", value);
+    });
 
     upstreamResp.headers.forEach((value, key) => {
       const k = key.toLowerCase();
@@ -79,23 +147,71 @@ app.all("/mcp/:secret", async (req, res) => {
       res.setHeader(key, value);
     });
 
-    // Stream della risposta (SSE incluso)
+    log("Response headers set on client connection");
+
+    // Stream della risposta (SSE incluso) — usiamo pass-through pipe per evitare buffering
     if (upstreamResp.body) {
-      const reader = upstreamResp.body.getReader();
-      res.on("close", () => {
-        try { reader.cancel(); } catch {}
+      // Converti Web ReadableStream in Node.js Readable stream
+      const nodeStream = Readable.fromWeb(upstreamResp.body);
+
+      res.flushHeaders && res.flushHeaders();
+
+      let chunkCount = 0;
+      let totalBytes = 0;
+      let pipeStarted = false;
+
+      nodeStream.on("readable", () => {
+        if (!pipeStarted) {
+          log("Upstream stream became readable - starting to read data");
+          pipeStarted = true;
+        }
       });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      res.end();
+      nodeStream.on("data", (chunk) => {
+        chunkCount++;
+        totalBytes += chunk.length;
+        log("Chunk from upstream", chunk.length, "bytes (total:", totalBytes, "bytes,", chunkCount, "chunks)");
+        // For small chunks, also log text to help debugging
+        if (chunk.length < 256) {
+          try { 
+            const text = chunk.toString("utf8").slice(0, 200);
+            log("Chunk text:", JSON.stringify(text)); 
+          } catch {}
+        }
+      });
+
+      nodeStream.on("error", (err) => {
+        log("Upstream stream error", err?.message ?? err);
+        if (!res.headersSent) {
+          res.status(502).json({ error: "Upstream stream failed: " + (err?.message ?? String(err)) });
+        } else {
+          res.end();
+        }
+      });
+
+      res.on("close", () => {
+        log("Client closed connection - destroying upstream stream");
+        try { nodeStream.destroy(); } catch (e) { log("nodeStream.destroy error", e?.message ?? e); }
+      });
+
+      res.on("error", (err) => {
+        log("Response stream error", err?.message ?? err);
+        try { nodeStream.destroy(); } catch {}
+      });
+
+      log("Starting pipe from upstream stream to client response");
+      nodeStream.pipe(res);
+
+      // Aspetta la fine dello stream per logging finale
+      nodeStream.on("end", () => {
+        log("Upstream stream ended - total:", totalBytes, "bytes,", chunkCount, "chunks, pipeStarted:", pipeStarted);
+      });
     } else {
+      log("Upstream had no body; ending response");
       res.end();
     }
   } catch (err) {
+    log("Request handler error", err && err.stack ? err.stack : err);
     res.status(500).json({ error: err?.message ?? String(err) });
   }
 });
