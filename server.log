@@ -1,4 +1,4 @@
-2026-02-21T12:47:50.917Z Starting server with config: {
+2026-02-21T12:55:32.083Z Starting server with config: {
   PORT: 10000,
   UPSTREAM_MCP_URL: 'https://mcp.render.com/mcp',
   RENDER_API_KEY: 'rnd_…CoUb',
@@ -6,3 +6,33 @@
   UPSTREAM_TIMEOUT_MS: '120000'
 }
 Listening on 10000
+2026-02-21T12:55:32.808Z Incoming request POST /mcp/36bf3a65-1518-414e-9218-741d24a01cd7
+2026-02-21T12:55:32.808Z Request headers {
+  host: 'localhost:10000',
+  'user-agent': 'curl/8.5.0',
+  accept: '*/*',
+  'content-type': 'application/json',
+  'content-length': '58'
+}
+2026-02-21T12:55:32.809Z Request body size 58
+2026-02-21T12:55:32.809Z Forwarding to upstream https://mcp.render.com/mcp method POST
+2026-02-21T12:55:33.057Z Upstream responded 200 OK
+2026-02-21T12:55:33.060Z Upstream response headers:
+2026-02-21T12:55:33.060Z    alt-svc : h3=":443"; ma=86400
+2026-02-21T12:55:33.063Z    cf-cache-status : DYNAMIC
+2026-02-21T12:55:33.063Z    cf-ray : 9d16660f79a50eb0-AMS
+2026-02-21T12:55:33.063Z    connection : keep-alive
+2026-02-21T12:55:33.063Z    content-encoding : br
+2026-02-21T12:55:33.063Z    content-length : 137
+2026-02-21T12:55:33.063Z    content-type : application/json
+2026-02-21T12:55:33.063Z    date : Sat, 21 Feb 2026 12:55:33 GMT
+2026-02-21T12:55:33.063Z    mcp-session-id : mcp-session-c8d53096-7f6a-4454-bb61-03ba25c66b32
+2026-02-21T12:55:33.063Z    rndr-id : 1f571ca7-eed4-45be
+2026-02-21T12:55:33.063Z    server : cloudflare
+2026-02-21T12:55:33.063Z    vary : Accept-Encoding
+2026-02-21T12:55:33.063Z    x-render-origin-server : Render
+2026-02-21T12:55:33.063Z Response headers set on client connection
+2026-02-21T12:55:33.064Z Response info - ContentType: application/json IsSSE: false ContentLength: 137
+2026-02-21T12:55:33.064Z >> Using BUFFER mode (non-SSE, content-length present)
+2026-02-21T12:55:33.067Z Detected brotli-compressed body, attempting decompression
+2026-02-21T12:55:33.071Z Decompression failed, fallback: using raw body Decompression failed

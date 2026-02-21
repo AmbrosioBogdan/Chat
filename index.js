@@ -1,7 +1,5 @@
 import express from "express";
 import { Readable } from "stream";
-import { once } from "events";
-import { createBrotliDecompress } from "zlib";
 
 const app = express();
 
@@ -145,133 +143,67 @@ app.all("/mcp/:secret", async (req, res) => {
       const k = key.toLowerCase();
       // Evitiamo header che Express gestisce da solo o che possono essere problematici
       if (k === "transfer-encoding") return;
-      // Rimuoviamo content-encoding perché potrebbe essere compresso da Render
-      // e causerebbe problemi di decompressione al client
-      if (k === "content-encoding") return;
+      // CRITICO: rimuovere content-encoding
+      // Node.js fetch() decomprime AUTOMATICAMENTE il body
+      // Se propaghiamo content-encoding: br al client, cercherà di decomprimere dati GIÀ decompressi → timeout
+      if (k === "content-encoding") {
+        log("Stripping content-encoding header (Node.js fetch already decompressed)");
+        return;
+      }
       res.setHeader(key, value);
     });
 
     log("Response headers set on client connection");
 
-    // Stream della risposta (SSE incluso) — usiamo pass-through pipe per evitare buffering
-    // MA: se non è SSE, leggiamo tutto come buffer per evitare blocchi
-    const contentType = upstreamResp.headers.get("content-type") || "";
-    const isSSE = contentType.includes("text/event-stream");
-    const contentLength = upstreamResp.headers.get("content-length");
-    const isBinary = contentType.includes("application/octet-stream") || contentType.includes("text/plain");
-    
-    log("Response info - ContentType:", contentType, "IsSSE:", isSSE, "ContentLength:", contentLength);
-
+    // Stream della risposta — SEMPRE streaming passthrough (no buffering, no manual decompression)
+    // Node.js fetch() decomprime automaticamente. Usiamo pipe per trasparenza e 0-copy
     if (upstreamResp.body) {
-      // Caso 1: SSE stream → usa pipe per non bloccare
-      if (isSSE && !contentLength) {
-        log(">> Using STREAM mode (SSE)");
-        const nodeStream = Readable.fromWeb(upstreamResp.body);
-        res.flushHeaders && res.flushHeaders();
+      log(">> Starting streaming response passthrough");
+      const nodeStream = Readable.fromWeb(upstreamResp.body);
 
-        let chunkCount = 0;
-        let totalBytes = 0;
-        let pipeStarted = false;
+      res.flushHeaders && res.flushHeaders();
 
-        nodeStream.on("readable", () => {
-          if (!pipeStarted) {
-            log("Upstream stream became readable - starting to read data");
-            pipeStarted = true;
-          }
-        });
+      let chunkCount = 0;
+      let totalBytes = 0;
 
-        nodeStream.on("data", (chunk) => {
-          chunkCount++;
-          totalBytes += chunk.length;
-          log("Chunk from upstream", chunk.length, "bytes (total:", totalBytes, "bytes,", chunkCount, "chunks)");
-          if (chunk.length < 256) {
-            try { 
-              const text = chunk.toString("utf8").slice(0, 200);
-              log("Chunk text:", JSON.stringify(text)); 
-            } catch {}
-          }
-        });
-
-        nodeStream.on("error", (err) => {
-          log("Upstream stream error", err?.message ?? err);
-          if (!res.headersSent) {
-            res.status(502).json({ error: "Upstream stream failed: " + (err?.message ?? String(err)) });
-          } else {
-            res.end();
-          }
-        });
-
-        res.on("close", () => {
-          log("Client closed connection - destroying upstream stream");
-          try { nodeStream.destroy(); } catch (e) { log("nodeStream.destroy error", e?.message ?? e); }
-        });
-
-        res.on("error", (err) => {
-          log("Response stream error", err?.message ?? err);
-          try { nodeStream.destroy(); } catch {}
-        });
-
-        log("Starting pipe from upstream stream to client response");
-        nodeStream.pipe(res);
-
-        nodeStream.on("end", () => {
-          log("Upstream stream ended - total:", totalBytes, "bytes,", chunkCount, "chunks, pipeStarted:", pipeStarted);
-        });
-      } 
-      // Caso 2: Response non-streaming (JSON, form data, etc.) → buffer tutto e rispondi subito
-      else {
-        log(">> Using BUFFER mode (non-SSE, content-length present)");
-        try {
-          const contentEncoding = upstreamResp.headers.get("content-encoding") || "";
-          const nodeStream = Readable.fromWeb(upstreamResp.body);
-
-          let buffer;
-          
-          if (contentEncoding.includes("br")) {
-            log("Decompressing brotli-compressed body via stream");
-            const decompressStream = createBrotliDecompress();
-            const chunks = [];
-            
-            await new Promise((resolve, reject) => {
-              nodeStream
-                .on("error", reject)
-                .pipe(decompressStream)
-                .on("data", (chunk) => {
-                  chunks.push(chunk);
-                })
-                .on("end", () => {
-                  resolve();
-                })
-                .on("error", reject);
-            });
-            
-            buffer = Buffer.concat(chunks);
-            log("Decompressed size:", buffer.length, "bytes");
-          } else {
-            // Non compresso, leggi direttamente
-            const chunks = [];
-            await new Promise((resolve, reject) => {
-              nodeStream
-                .on("data", (chunk) => chunks.push(chunk))
-                .on("end", resolve)
-                .on("error", reject);
-            });
-            buffer = Buffer.concat(chunks);
-          }
-
-          log("Response buffered:", buffer.length, "bytes");
-          res.write(buffer);
-          res.end();
-          log("Response sent to client");
-        } catch (err) {
-          log("Error buffering upstream response", err?.message ?? err);
-          if (!res.headersSent) {
-            res.status(502).json({ error: "Failed to read upstream response: " + (err?.message ?? String(err)) });
-          } else {
-            res.end();
-          }
+      nodeStream.on("data", (chunk) => {
+        chunkCount++;
+        totalBytes += chunk.length;
+        log("Chunk from upstream", chunk.length, "bytes (total:", totalBytes, "bytes,", chunkCount, "chunks)");
+        // For small chunks, also log text to help debugging
+        if (chunk.length < 256) {
+          try { 
+            const text = chunk.toString("utf8").slice(0, 200);
+            log("Chunk text:", JSON.stringify(text)); 
+          } catch {}
         }
-      }
+      });
+
+      nodeStream.on("error", (err) => {
+        log("Upstream stream error", err?.message ?? err);
+        if (!res.headersSent) {
+          res.status(502).json({ error: "Upstream stream failed: " + (err?.message ?? String(err)) });
+        } else {
+          res.end();
+        }
+      });
+
+      res.on("close", () => {
+        log("Client closed connection - destroying upstream stream");
+        try { nodeStream.destroy(); } catch (e) { log("nodeStream.destroy error", e?.message ?? e); }
+      });
+
+      res.on("error", (err) => {
+        log("Response stream error", err?.message ?? err);
+        try { nodeStream.destroy(); } catch {}
+      });
+
+      log("Starting pipe from upstream stream to client response");
+      nodeStream.pipe(res);
+
+      nodeStream.on("end", () => {
+        log("Upstream stream ended - total:", totalBytes, "bytes,", chunkCount, "chunks");
+      });
     } else {
       log("Upstream had no body; ending response");
       res.end();
