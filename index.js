@@ -222,28 +222,45 @@ app.all("/mcp/:secret", async (req, res) => {
       else {
         log(">> Using BUFFER mode (non-SSE, content-length present)");
         try {
-          let buffer = await upstreamResp.arrayBuffer();
-          
-          // Se la response è compresso da Render (content-encoding: br), decomprimiamo
           const contentEncoding = upstreamResp.headers.get("content-encoding") || "";
-          if (contentEncoding.includes("br")) {
-            log("Decompressing brotli-compressed body");
-            const decompressed = await new Promise((resolve, reject) => {
-              const decompress = createBrotliDecompress();
-              let chunks = [];
-              decompress.on("data", (chunk) => chunks.push(chunk));
-              decompress.on("end", () => resolve(Buffer.concat(chunks)));
-              decompress.on("error", reject);
-              decompress.write(Buffer.from(buffer));
-              decompress.end();
-            });
-            buffer = decompressed.buffer;
-            log("Decompressed size:", buffer.byteLength, "bytes");
-          }
+          const nodeStream = Readable.fromWeb(upstreamResp.body);
+
+          let buffer;
           
-          const nodeBuffer = Buffer.from(buffer);
-          log("Response buffered:", nodeBuffer.length, "bytes");
-          res.write(nodeBuffer);
+          if (contentEncoding.includes("br")) {
+            log("Decompressing brotli-compressed body via stream");
+            const decompressStream = createBrotliDecompress();
+            const chunks = [];
+            
+            await new Promise((resolve, reject) => {
+              nodeStream
+                .on("error", reject)
+                .pipe(decompressStream)
+                .on("data", (chunk) => {
+                  chunks.push(chunk);
+                })
+                .on("end", () => {
+                  resolve();
+                })
+                .on("error", reject);
+            });
+            
+            buffer = Buffer.concat(chunks);
+            log("Decompressed size:", buffer.length, "bytes");
+          } else {
+            // Non compresso, leggi direttamente
+            const chunks = [];
+            await new Promise((resolve, reject) => {
+              nodeStream
+                .on("data", (chunk) => chunks.push(chunk))
+                .on("end", resolve)
+                .on("error", reject);
+            });
+            buffer = Buffer.concat(chunks);
+          }
+
+          log("Response buffered:", buffer.length, "bytes");
+          res.write(buffer);
           res.end();
           log("Response sent to client");
         } catch (err) {
