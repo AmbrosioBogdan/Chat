@@ -1,8 +1,8 @@
-2026-02-21T12:19:12.438Z Starting server with config: {
+2026-02-21T12:47:50.917Z Starting server with config: {
   PORT: 10000,
   UPSTREAM_MCP_URL: 'https://mcp.render.com/mcp',
   RENDER_API_KEY: 'rnd_…CoUb',
   MCP_PATH_SECRET: '36bf…1cd7',
-  UPSTREAM_TIMEOUT_MS: 120000
+  UPSTREAM_TIMEOUT_MS: '120000'
 }
 Listening on 10000
