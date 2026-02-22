@@ -131,14 +131,34 @@ function injectWorkspaceToBody(body, workspaceId, reqLog) {
     // Don't inject into initialize or other non-tools calls
     if (obj.method !== "tools/call") return body;
     
-    // Inject workspace_id into params if not already there
+    let injected = false;
+    
+    // Try injecting into params.arguments first (Render MCP standard)
     if (!obj.params) obj.params = {};
-    if (!obj.params.workspace_id) {
-      obj.params.workspace_id = workspaceId;
-      reqLog(`✏️ Injected workspace_id: ${workspaceId.substring(0, 8)}...`);
+    if (!obj.params.arguments) obj.params.arguments = {};
+    
+    if (!obj.params.arguments.workspace_id) {
+      obj.params.arguments.workspace_id = workspaceId;
+      injected = true;
+      reqLog(`✏️ Injected workspace_id into params.arguments: ${workspaceId.substring(0, 8)}...`);
     }
     
-    return Buffer.from(JSON.stringify(obj));
+    // Also inject at top-level params as backup
+    if (!obj.params.workspace_id) {
+      obj.params.workspace_id = workspaceId;
+      if (!injected) reqLog(`✏️ Injected workspace_id into params: ${workspaceId.substring(0, 8)}...`);
+    }
+    
+    const result = Buffer.from(JSON.stringify(obj));
+    if (reqLog && injected) {
+      try {
+        // Log the modified structure for verification
+        const preview = JSON.stringify(obj).substring(0, 300);
+        reqLog(`  Structure: ${preview}...`);
+      } catch (e) {}
+    }
+    
+    return result;
   } catch (e) {
     if (reqLog) reqLog(`⚠️ Could not inject workspace: ${e?.message}`);
     return body;
@@ -273,6 +293,13 @@ app.all("/mcp/:secret", async (req, res) => {
     if (!headers["Accept"] && !headers["accept"]) {
       headers["Accept"] = "text/event-stream";
     }
+    
+    // Aggiungi workspace_id come header custom se disponibile nel cache
+    const cachedWorkspaceForHeader = req.params.secret ? getWorkspaceId(req.params.secret) : null;
+    if (cachedWorkspaceForHeader) {
+      headers["X-Workspace-ID"] = cachedWorkspaceForHeader;
+      reqLog(`📬 Added X-Workspace-ID header: ${cachedWorkspaceForHeader.substring(0, 8)}...`);
+    }
 
     const method = req.method.toUpperCase();
     const hasBody = !(method === "GET" || method === "HEAD");
@@ -368,9 +395,16 @@ app.all("/mcp/:secret", async (req, res) => {
         const preview = firstChunk ? ` | preview: ${chunk.toString("utf8", 0, Math.min(200, chunk.length)).replace(/\n/g, "\\n")}` : "";
         reqLog(`Chunk #${chunkCount}: ${chunk.length}B (total: ${totalBytes}B)${preview}`);
         
-        // Accumulate response for workspace extraction
+        // Accumulate response for workspace extraction and error detection
         try {
           responseBuffer += chunk.toString("utf8");
+          
+          // Diagnostic: detect "no workspace set" errors
+          if (responseBuffer.includes("no workspace set")) {
+            reqLog(`⚠️ DIAGNOSTIC: Render MCP says 'no workspace set' - workspace_id may not be in expected location`);
+            reqLog(`⚠️ Cached workspace: ${cachedWorkspaceForHeader ? cachedWorkspaceForHeader.substring(0, 8) + "..." : "NONE"}`);
+          }
+          
           // Try to extract workspace_id if this looks like a complete JSON object
           if (!workspaceExtracted && responseBuffer.includes('"tea-') && req.params.secret) {
             const extractedId = extractWorkspaceId(responseBuffer);
