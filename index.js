@@ -21,6 +21,9 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY; // API key Render (Bearer)
 
 const UPSTREAM_MCP_URL = process.env.UPSTREAM_MCP_URL || "https://mcp.render.com/mcp";
 
+// Cache workspace per sessione (keyed by secret) per evitare perdita di stato tra initialize
+const workspaceCache = new Map(); // Format: { secret -> { workspace_id, timestamp } }
+
 // semplice logger con timestamp e salvataggio su file
 function now() {
   return new Date().toISOString();
@@ -70,6 +73,68 @@ log("Starting server with config:", {
   MCP_PATH_SECRET: mask(MCP_PATH_SECRET || process.env.MCP_SHARED_SECRET),
   UPSTREAM_TIMEOUT_MS: process.env.UPSTREAM_TIMEOUT_MS || 120000,
 });
+log("Log file: " + logFilePath);
+log("Log buffer size: " + maxLogLines + " lines");
+log("════════════════════════════════════════════════════════════");
+
+// Helper functions for workspace caching
+function extractWorkspaceId(text) {
+  // Try to find workspace ID in responses like "automatically selected it[{...\"id\":\"tea-xxx\""
+  // Or in JSON responses that contain workspace info
+  try {
+    const match = text.match(/"id"\s*:\s*"(tea-[a-z0-9]+)"/);
+    if (match) return match[1];
+  } catch (e) {}
+  return null;
+}
+
+function saveWorkspaceId(secret, workspaceId) {
+  if (!secret || !workspaceId) return;
+  workspaceCache.set(secret, { 
+    workspace_id: workspaceId, 
+    timestamp: Date.now() 
+  });
+  log(`💾 Saved workspace ${workspaceId.substring(0, 8)}... for secret`);
+}
+
+function getWorkspaceId(secret) {
+  const cached = workspaceCache.get(secret);
+  if (!cached) return null;
+  
+  // Expire cache after 30 minutes
+  if (Date.now() - cached.timestamp > 30 * 60 * 1000) {
+    workspaceCache.delete(secret);
+    return null;
+  }
+  
+  return cached.workspace_id;
+}
+
+function injectWorkspaceToBody(body, workspaceId, reqLog) {
+  if (!body || !workspaceId) return body;
+  
+  try {
+    let obj = body;
+    if (Buffer.isBuffer(body)) {
+      obj = JSON.parse(body.toString("utf8"));
+    }
+    
+    // Don't inject into initialize or other non-tools calls
+    if (obj.method !== "tools/call") return body;
+    
+    // Inject workspace_id into params if not already there
+    if (!obj.params) obj.params = {};
+    if (!obj.params.workspace_id) {
+      obj.params.workspace_id = workspaceId;
+      reqLog(`✏️ Injected workspace_id: ${workspaceId.substring(0, 8)}...`);
+    }
+    
+    return Buffer.from(JSON.stringify(obj));
+  } catch (e) {
+    if (reqLog) reqLog(`⚠️ Could not inject workspace: ${e?.message}`);
+    return body;
+  }
+}
 log("Log file:", logFilePath);
 log("Log buffer size:", maxLogLines, "lines");
 log("═".repeat(60));
@@ -205,7 +270,15 @@ app.all("/mcp/:secret", async (req, res) => {
     }, timeoutMs);
 
     // Per ora inoltriamo solo body bufferizzati (express.raw). Evitiamo conversioni complesse.
-    const bodyToSend = hasBody && req.body && Buffer.isBuffer(req.body) ? req.body : undefined;
+    let bodyToSend = hasBody && req.body && Buffer.isBuffer(req.body) ? req.body : undefined;
+
+    // Try to inject cached workspace_id if available (to preserve state across reconnects)
+    if (bodyToSend && req.params.secret) {
+      const cachedWorkspace = getWorkspaceId(req.params.secret);
+      if (cachedWorkspace) {
+        bodyToSend = injectWorkspaceToBody(bodyToSend, cachedWorkspace, reqLog);
+      }
+    }
 
     reqLog(`↗ UPSTREAM ${method} → ${UPSTREAM_MCP_URL}`);
     const upstreamResp = await fetch(UPSTREAM_MCP_URL, {
@@ -267,12 +340,28 @@ app.all("/mcp/:secret", async (req, res) => {
       let chunkCount = 0;
       let totalBytes = 0;
       let firstChunk = true;
+      let responseBuffer = "";
 
       nodeStream.on("data", (chunk) => {
         chunkCount++;
         totalBytes += chunk.length;
         const preview = firstChunk ? ` | preview: ${chunk.toString("utf8", 0, Math.min(200, chunk.length)).replace(/\n/g, "\\n")}` : "";
         reqLog(`Chunk #${chunkCount}: ${chunk.length}B (total: ${totalBytes}B)${preview}`);
+        
+        // Accumulate response for workspace extraction
+        try {
+          responseBuffer += chunk.toString("utf8");
+          // Try to extract workspace_id if this looks like a complete JSON object
+          if (responseBuffer.includes('"tea-') && req.params.secret) {
+            const extractedId = extractWorkspaceId(responseBuffer);
+            if (extractedId) {
+              saveWorkspaceId(req.params.secret, extractedId);
+            }
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+        
         firstChunk = false;
       });
 
