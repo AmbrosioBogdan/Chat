@@ -146,12 +146,14 @@ app.all("/mcp/:secret", async (req, res) => {
     
     // Extract and log workspace/method info from body for debugging
     let bodyInfo = "";
+    let fullBody = null;
     if (req.body) {
       try {
         let b = req.body;
         if (Buffer.isBuffer(b)) {
           b = JSON.parse(b.toString("utf8"));
         }
+        fullBody = b;
         if (b.params?.workspace_id) {
           bodyInfo = ` | workspace=${b.params.workspace_id}`;
         }
@@ -159,6 +161,16 @@ app.all("/mcp/:secret", async (req, res) => {
           bodyInfo += ` | method=${b.method}`;
         }
         reqLog(`Body info${bodyInfo} | size=${Buffer.isBuffer(req.body) ? req.body.length : JSON.stringify(req.body).length} bytes`);
+        
+        // Log full body for initialize/tools calls for debugging state loss issue
+        if (b.method === "initialize" || b.method?.startsWith("tools/")) {
+          try {
+            const bodyStr = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : JSON.stringify(b);
+            reqLog(`Full request: ${bodyStr.substring(0, 500)}`);
+          } catch (e) {
+            reqLog(`(could not log full body)`);
+          }
+        }
       } catch (e) {
         reqLog(`Body parse error: ${e?.message}`);
       }
@@ -205,6 +217,13 @@ app.all("/mcp/:secret", async (req, res) => {
     }).finally(() => clearTimeout(timeoutId));
 
     reqLog(`← RESPONSE ${upstreamResp.status} ${upstreamResp.statusText}`);
+
+    // Log response headers for debugging
+    const contentType = upstreamResp.headers.get("content-type") || "none";
+    const isSSE = contentType.includes("text/event-stream");
+    if (upstreamResp.status === 202 || isSSE) {
+      reqLog(`📡 SSE/Event stream: status=${upstreamResp.status}, content-type=${contentType}`);
+    }
 
     // Propaghiamo status e header (incluso Content-Type: text/event-stream)
     res.status(upstreamResp.status);
@@ -267,7 +286,7 @@ app.all("/mcp/:secret", async (req, res) => {
       });
 
       res.on("close", () => {
-        reqLog("✓ Client closed connection normally");
+        reqLog(`✓ Client closed connection normally (after ${totalBytes}B in ${chunkCount} chunks)`);
         try { nodeStream.destroy(); } catch (e) { reqLog(`destroy error: ${e?.message}`); }
       });
 
@@ -283,7 +302,7 @@ app.all("/mcp/:secret", async (req, res) => {
       // SINGLE pipe call - do not pipe twice!
       nodeStream.pipe(res);
     } else {
-      reqLog("(no body)");
+      reqLog("⚠️ Response has no body (202 Accepted or similar). Sending empty response.");
       res.end();
     }
   } catch (err) {
