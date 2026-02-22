@@ -241,7 +241,8 @@ app.all("/mcp/:secret", async (req, res) => {
     // Node.js fetch() decomprime automaticamente. Usiamo pipe per trasparenza e 0-copy
     if (upstreamResp.body) {
       reqLog("Starting streaming response passthrough");
-      Readable.fromWeb(upstreamResp.body);
+      const nodeStream = Readable.fromWeb(upstreamResp.body);
+      nodeStream.pipe(res);
 
       res.flushHeaders && res.flushHeaders();
 
