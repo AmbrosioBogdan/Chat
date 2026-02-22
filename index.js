@@ -242,17 +242,19 @@ app.all("/mcp/:secret", async (req, res) => {
     if (upstreamResp.body) {
       reqLog("Starting streaming response passthrough");
       const nodeStream = Readable.fromWeb(upstreamResp.body);
-      nodeStream.pipe(res);
-
+      
       res.flushHeaders && res.flushHeaders();
 
       let chunkCount = 0;
       let totalBytes = 0;
+      let firstChunk = true;
 
       nodeStream.on("data", (chunk) => {
         chunkCount++;
         totalBytes += chunk.length;
-        reqLog(`Chunk #${chunkCount}: ${chunk.length}B (total: ${totalBytes}B)`);
+        const preview = firstChunk ? ` | preview: ${chunk.toString("utf8", 0, Math.min(200, chunk.length)).replace(/\n/g, "\\n")}` : "";
+        reqLog(`Chunk #${chunkCount}: ${chunk.length}B (total: ${totalBytes}B)${preview}`);
+        firstChunk = false;
       });
 
       nodeStream.on("error", (err) => {
@@ -265,20 +267,21 @@ app.all("/mcp/:secret", async (req, res) => {
       });
 
       res.on("close", () => {
-        reqLog("Client closed connection");
+        reqLog("✓ Client closed connection normally");
         try { nodeStream.destroy(); } catch (e) { reqLog(`destroy error: ${e?.message}`); }
       });
 
       res.on("error", (err) => {
-        reqLog(`✗ Response error: ${err?.message ?? err}`);
+        reqLog(`✗ Response write error: ${err?.message ?? err}`);
         try { nodeStream.destroy(); } catch {}
       });
 
-      nodeStream.pipe(res);
-
       nodeStream.on("end", () => {
-        reqLog(`✓ Complete: ${totalBytes}B in ${chunkCount} chunks`);
+        reqLog(`✓ Stream complete: ${totalBytes}B in ${chunkCount} chunks`);
       });
+
+      // SINGLE pipe call - do not pipe twice!
+      nodeStream.pipe(res);
     } else {
       reqLog("(no body)");
       res.end();
