@@ -79,10 +79,19 @@ log("═════════════════════════
 
 // Helper functions for workspace caching
 function extractWorkspaceId(text) {
-  // Try to find workspace ID in responses like "automatically selected it[{...\"id\":\"tea-xxx\""
-  // Or in JSON responses that contain workspace info
+  // Try to find workspace ID in responses - handles both escaped and unescaped JSON
+  // Pattern: "id":"tea-xxx" or \"id\":\"tea-xxx\" (escaped) or ID directly
   try {
-    const match = text.match(/"id"\s*:\s*"(tea-[a-z0-9]+)"/);
+    // First try with normal quotes
+    let match = text.match(/"id"\s*:\s*"(tea-[a-z0-9]+)"/);
+    if (match) return match[1];
+    
+    // Then try with escaped quotes
+    match = text.match(/\\+"id\\+":\s*\\+"(tea-[a-z0-9]+)\\+"/);
+    if (match) return match[1];
+    
+    // Finally, try to find the ID pattern directly (tea-xxx)
+    match = text.match(/(tea-[a-z0-9]+)/);
     if (match) return match[1];
   } catch (e) {}
   return null;
@@ -283,7 +292,10 @@ app.all("/mcp/:secret", async (req, res) => {
     if (bodyToSend && req.params.secret) {
       const cachedWorkspace = getWorkspaceId(req.params.secret);
       if (cachedWorkspace) {
+        reqLog(`🔄 CACHE HIT: found workspace ${cachedWorkspace.substring(0, 8)}... for secret`);
         bodyToSend = injectWorkspaceToBody(bodyToSend, cachedWorkspace, reqLog);
+      } else {
+        reqLog(`❌ CACHE MISS: no workspace cached for secret`);
       }
     }
 
