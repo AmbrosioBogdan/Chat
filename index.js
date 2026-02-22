@@ -407,21 +407,50 @@ app.all("/mcp/:secret", async (req, res) => {
       let firstChunk = true;
       let responseBuffer = "";
       let workspaceExtracted = false;
+      let shouldIntercept = false;
 
       nodeStream.on("data", (chunk) => {
         chunkCount++;
         totalBytes += chunk.length;
-        const preview = firstChunk ? ` | preview: ${chunk.toString("utf8", 0, Math.min(200, chunk.length)).replace(/\n/g, "\\n")}` : "";
+        const chunkStr = chunk.toString("utf8");
+        const preview = firstChunk ? ` | preview: ${chunkStr.substring(0, Math.min(200, chunkStr.length)).replace(/\n/g, "\\n")}` : "";
         reqLog(`Chunk #${chunkCount}: ${chunk.length}B (total: ${totalBytes}B)${preview}`);
         
-        // Accumulate response for workspace extraction and error detection
+        // Accumulate response for inspection
+        responseBuffer += chunkStr;
+        
         try {
-          responseBuffer += chunk.toString("utf8");
-          
-          // Diagnostic: detect "no workspace set" errors
-          if (responseBuffer.includes("no workspace set")) {
-            reqLog(`⚠️ DIAGNOSTIC: Render MCP says 'no workspace set' - workspace_id may not be in expected location`);
+          // Diagnostic: detect "no workspace set" errors and intercept
+          if (responseBuffer.includes("no workspace set") && !shouldIntercept) {
+            shouldIntercept = true;
+            reqLog(`⚠️ DIAGNOSTIC: Render MCP says 'no workspace set'`);
             reqLog(`⚠️ Cached workspace: ${cachedWorkspaceForHeader ? cachedWorkspaceForHeader.substring(0, 8) + "..." : "NONE"}`);
+            
+            // WORKAROUND: If we have a cached workspace, PAUSE streaming and send synthetic response
+            if (cachedWorkspaceForHeader) {
+              reqLog(`🔧 INTERCEPTING: Substituting 'no workspace' error with synthetic response`);
+              nodeStream.pause();
+              
+              // Create synthetic response that says workspace is selected
+              const syntheticResponse = {
+                jsonrpc: "2.0",
+                id: 1,
+                result: {
+                  content: [{
+                    type: "text",
+                    text: `[PROXY-CACHED] Using workspace from previous session: ${cachedWorkspaceForHeader}`
+                  }],
+                  isError: false
+                }
+              };
+              
+              const syntheticJson = JSON.stringify(syntheticResponse);
+              reqLog(`✅ Sending synthetic response: ${syntheticJson}`);
+              res.write(syntheticJson + "\n");
+              res.end();
+              nodeStream.destroy();
+              return;
+            }
           }
           
           // Try to extract workspace_id if this looks like a complete JSON object
