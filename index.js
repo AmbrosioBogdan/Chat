@@ -128,25 +128,36 @@ function injectWorkspaceToBody(body, workspaceId, reqLog) {
       obj = JSON.parse(body.toString("utf8"));
     }
     
-    // Don't inject into initialize or other non-tools calls
-    if (obj.method !== "tools/call") return body;
-    
     let injected = false;
     
-    // Try injecting into params.arguments first (Render MCP standard)
-    if (!obj.params) obj.params = {};
-    if (!obj.params.arguments) obj.params.arguments = {};
-    
-    if (!obj.params.arguments.workspace_id) {
-      obj.params.arguments.workspace_id = workspaceId;
-      injected = true;
-      reqLog(`✏️ Injected workspace_id into params.arguments: ${workspaceId.substring(0, 8)}...`);
+    // For initialize: inject workspace_id into params (session-level context)
+    if (obj.method === "initialize") {
+      if (!obj.params) obj.params = {};
+      if (!obj.params.workspace_id) {
+        obj.params.workspace_id = workspaceId;
+        injected = true;
+        reqLog(`✏️ INITIALIZE: injected workspace_id into session params: ${workspaceId.substring(0, 8)}...`);
+      }
     }
     
-    // Also inject at top-level params as backup
-    if (!obj.params.workspace_id) {
-      obj.params.workspace_id = workspaceId;
-      if (!injected) reqLog(`✏️ Injected workspace_id into params: ${workspaceId.substring(0, 8)}...`);
+    // For tools/call: inject into params.arguments (tool-level context)
+    else if (obj.method === "tools/call") {
+      if (!obj.params) obj.params = {};
+      if (!obj.params.arguments) obj.params.arguments = {};
+      
+      if (!obj.params.arguments.workspace_id) {
+        obj.params.arguments.workspace_id = workspaceId;
+        injected = true;
+        reqLog(`✏️ TOOL: injected workspace_id into params.arguments: ${workspaceId.substring(0, 8)}...`);
+      }
+    }
+    
+    // For other methods: also inject as header will handle it
+    else {
+      if (!obj.params) obj.params = {};
+      if (!obj.params.workspace_id) {
+        obj.params.workspace_id = workspaceId;
+      }
     }
     
     const result = Buffer.from(JSON.stringify(obj));
@@ -154,7 +165,7 @@ function injectWorkspaceToBody(body, workspaceId, reqLog) {
       try {
         // Log the modified structure for verification
         const preview = JSON.stringify(obj).substring(0, 300);
-        reqLog(`  Structure: ${preview}...`);
+        reqLog(`  Modified: ${preview}...`);
       } catch (e) {}
     }
     
@@ -322,7 +333,15 @@ app.all("/mcp/:secret", async (req, res) => {
         reqLog(`🔄 CACHE HIT: found workspace ${cachedWorkspace.substring(0, 8)}... for secret`);
         bodyToSend = injectWorkspaceToBody(bodyToSend, cachedWorkspace, reqLog);
       } else {
-        reqLog(`❌ CACHE MISS: no workspace cached for secret`);
+        // For initialize specifically, be explicit about cache miss
+        try {
+          const body = JSON.parse(bodyToSend.toString("utf8"));
+          if (body.method === "initialize") {
+            reqLog(`❌ INITIALIZE: no cached workspace to inject`);
+          } else {
+            reqLog(`❌ CACHE MISS: no workspace cached for secret`);
+          }
+        } catch (e) {}
       }
     }
 
