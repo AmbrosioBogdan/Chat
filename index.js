@@ -231,7 +231,14 @@ app.all("/mcp/:secret", async (req, res) => {
         if (b.method === "initialize" || b.method?.startsWith("tools/")) {
           try {
             const bodyStr = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : JSON.stringify(b);
-            reqLog(`Full request: ${bodyStr.substring(0, 500)}`);
+            const preview = bodyStr.substring(0, 2500);
+            reqLog(`Full request: ${preview}`);
+            
+            // If this is tools/call with workspace_id in params, save it immediately
+            if (b.method === "tools/call" && b.params?.workspace_id && req.params.secret) {
+              saveWorkspaceId(req.params.secret, b.params.workspace_id);
+              reqLog(`📌 PARAMS had workspace_id: ${b.params.workspace_id.substring(0, 8)}...`);
+            }
           } catch (e) {
             reqLog(`(could not log full body)`);
           }
@@ -341,6 +348,7 @@ app.all("/mcp/:secret", async (req, res) => {
       let totalBytes = 0;
       let firstChunk = true;
       let responseBuffer = "";
+      let workspaceExtracted = false;
 
       nodeStream.on("data", (chunk) => {
         chunkCount++;
@@ -352,10 +360,12 @@ app.all("/mcp/:secret", async (req, res) => {
         try {
           responseBuffer += chunk.toString("utf8");
           // Try to extract workspace_id if this looks like a complete JSON object
-          if (responseBuffer.includes('"tea-') && req.params.secret) {
+          if (!workspaceExtracted && responseBuffer.includes('"tea-') && req.params.secret) {
             const extractedId = extractWorkspaceId(responseBuffer);
             if (extractedId) {
               saveWorkspaceId(req.params.secret, extractedId);
+              workspaceExtracted = true;
+              reqLog(`🔍 EXTRACTED workspace_id from response: ${extractedId.substring(0, 8)}...`);
             }
           }
         } catch (e) {
